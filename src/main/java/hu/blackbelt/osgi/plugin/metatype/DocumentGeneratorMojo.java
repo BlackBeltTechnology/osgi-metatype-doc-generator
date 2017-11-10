@@ -20,12 +20,18 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.text.MessageFormat;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
 @Mojo(name = "genDoc")
 public class DocumentGeneratorMojo extends AbstractMojo {
+
+    private static final String FREEMARKER_TEMPLATE_DIR = "/templates";
+    private static final String OCD_TEMPLATE_NAME = "ocd.ftl";
+    private static final String COMPONENTS_FILENAME = "components.txt";
+    private static final String OUTPUT_FILENAME_PATTERN = "ocd-{0}.html";
 
     @Parameter(property = "location", defaultValue = "${project.build.directory}/classes/OSGI-INF/metatype")
     String location;
@@ -36,7 +42,7 @@ public class DocumentGeneratorMojo extends AbstractMojo {
     @Parameter(defaultValue = "${project.groupId}:${project.artifactId}", readonly = true)
     String project;
 
-    @Parameter(defaultValue = "${project.build.directory}/osgi-metatype")
+    @Parameter(defaultValue = "${project.build.directory}/classes/META-INF/osgi-metatype")
     String output;
 
     private static JAXBContext jaxbContext;
@@ -53,13 +59,7 @@ public class DocumentGeneratorMojo extends AbstractMojo {
         final File file = new File(location);
         getLog().info("Processing OSGI metadata in " + file.getAbsolutePath());
 
-        final Path targetDir;
-        try {
-            targetDir = Files.createDirectories(Paths.get(output));
-        } catch (IOException ex) {
-            throw new MojoExecutionException("Unable to create target directory", ex);
-        }
-
+        final Path targetDir = getTargetDir();
         final Map<String, Tocd> ocds = new TreeMap<>();
         final Map<String, Tdesignate> designates = new TreeMap<>();
 
@@ -67,56 +67,55 @@ public class DocumentGeneratorMojo extends AbstractMojo {
             for (final Path path : directoryStream) {
                 final MetaData metaData = readMetaData(path);
                 for (final Tocd ocd : metaData.getOCDS()) {
-                    final String id = ocd.getId();
-                    ocds.put(id, ocd);
+                    ocds.put(ocd.getId(), ocd);
                 }
 
                 for (final Tdesignate designate : metaData.getDesignates()) {
-                    final String pid = designate.getPid();
-                    designates.put(pid, designate);
+                    designates.put(designate.getPid(), designate);
                 }
             }
         } catch (IOException ex) {
             throw new MojoExecutionException("Unable to process OSGi metadata", ex);
         }
 
-        final Configuration configuration = new Configuration(Configuration.VERSION_2_3_23);
         try {
-            if (templates != null) {
-                configuration.setDirectoryForTemplateLoading(new File(templates));
-            } else {
-                configuration.setTemplateLoader(new ClassTemplateLoader(DocumentGeneratorMojo.class, "/templates"));
+            final Writer listWriter = new FileWriter(targetDir.resolve(COMPONENTS_FILENAME).toFile());
+            for (final Map.Entry<String, Tdesignate> designate : designates.entrySet()) {
+                listWriter.append(designate.getKey()).append(":").
+                        append(MessageFormat.format(OUTPUT_FILENAME_PATTERN, designate.getValue().getObject().getOcdref()));
             }
-            configuration.setDefaultEncoding("UTF-8");
-            configuration.setTemplateExceptionHandler(TemplateExceptionHandler.RETHROW_HANDLER);
-            configuration.setLogTemplateExceptions(false);
+            listWriter.flush();
+            listWriter.close();
 
-            final Template index = configuration.getTemplate("index.ftl");
-            final Map<String, Object> indexModel = new HashMap<>();
-            indexModel.put("project", project);
-            final Writer indexWriter = new FileWriter(targetDir.resolve("index.html").toFile());
-            try {
-                index.process(indexModel, indexWriter);
-            } catch (TemplateException ex2) {
-                throw new MojoFailureException("Invalid OCD template", ex2);
-            }
-
-            final Template template = configuration.getTemplate("ocd.ftl");
             for (final Map.Entry<String, Tocd> me : ocds.entrySet()) {
                 final Map<String, Object> model = new HashMap<>();
                 model.put("project", project);
                 model.put("ocd", me.getValue());
-
-                final String targetFileName = "ocd-" + me.getKey().toString() + ".html";
-                final Writer wr = new FileWriter(targetDir.resolve(targetFileName).toFile());
-                try {
-                    template.process(model, wr);
-                } catch (TemplateException ex2) {
-                    throw new MojoFailureException("Invalid OCD template", ex2);
-                }
+                renderHtml(model, me.getKey(), targetDir);
             }
         } catch (IOException ex) {
             throw new MojoExecutionException("Unable to initialize templates for OSGi metadata", ex);
+        }
+    }
+
+    private void renderHtml(final Map<String, Object> model, String ocdId, Path targetDir) throws MojoFailureException, IOException {
+        final Configuration configuration = new Configuration(Configuration.VERSION_2_3_23);
+        if (templates != null) {
+            configuration.setDirectoryForTemplateLoading(new File(templates));
+        } else {
+            configuration.setTemplateLoader(new ClassTemplateLoader(DocumentGeneratorMojo.class, FREEMARKER_TEMPLATE_DIR));
+        }
+        configuration.setDefaultEncoding("UTF-8");
+        configuration.setTemplateExceptionHandler(TemplateExceptionHandler.RETHROW_HANDLER);
+        configuration.setLogTemplateExceptions(false);
+
+
+        final Template template = configuration.getTemplate(OCD_TEMPLATE_NAME);
+        try {
+            final String targetFileName = MessageFormat.format(OUTPUT_FILENAME_PATTERN, ocdId);
+            template.process(model, new FileWriter(targetDir.resolve(targetFileName).toFile()));
+        } catch (TemplateException ex2) {
+            throw new MojoFailureException("Invalid OCD template", ex2);
         }
     }
 
@@ -128,6 +127,14 @@ public class DocumentGeneratorMojo extends AbstractMojo {
             return (MetaData) unmarshaller.unmarshal(path.toFile());
         } catch (JAXBException ex) {
             throw new MojoExecutionException("Unable to parse OSGI metadata", ex);
+        }
+    }
+
+    private Path getTargetDir() throws MojoExecutionException {
+        try {
+            return Files.createDirectories(Paths.get(output));
+        } catch (IOException ex) {
+            throw new MojoExecutionException("Unable to create target directory", ex);
         }
     }
 }
